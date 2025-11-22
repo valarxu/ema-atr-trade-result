@@ -22,7 +22,7 @@
   "author": "EMA-ATR Strategy Analyzer",
   "license": "MIT",
   "engines": {
-    "node": ">=14.0.0"
+    "node": "22.x"
   },
   "dependencies": {},
   "devDependencies": {}
