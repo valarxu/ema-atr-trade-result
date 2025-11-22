@@ -1,0 +1,29 @@
+{
+  "name": "ema-atr-trading-analyzer",
+  "version": "1.0.0",
+  "description": "EMA-ATR 交易策略数据分析与可视化工具",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "convert": "node batch-convert.js",
+    "convert:single": "node convert-trading-data.js"
+  },
+  "keywords": [
+    "trading",
+    "ema",
+    "atr",
+    "strategy",
+    "analysis",
+    "visualization",
+    "cryptocurrency",
+    "pine-script"
+  ],
+  "author": "EMA-ATR Strategy Analyzer",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
