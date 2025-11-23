@@ -1,0 +1,159 @@
+//@version=6
+strategy("阿吉EMA-ATR-改良版 (ATR Risk Sizing + ADX Filter + ATR Stop/Trail)", 
+     overlay=true,
+     process_orders_on_close=true,
+     calc_on_every_tick=false,
+     initial_capital=10000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=10000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.1,   // 手续费百分比，按需要调整
+     slippage=0)             // 也可在这里模拟滑点（price ticks）
+
+// ====== 时间范围 ======
+startDateInput = input.time(defval=timestamp("2018-01-01T00:00"), title="回测开始日期")
+endDateInput   = input.time(defval=timestamp("2025-12-31T23:59"), title="回测结束日期")
+
+// ====== 核心参数 ======
+emaLength = input.int(120, "EMA 周期", minval=1)
+atrPeriod = input.int(14, "ATR 周期", minval=1)
+atrEntryMult = input.float(1.5, "进场 ATR 倍数（价格偏离阈值）", minval=0.1, step=0.1)
+riskPct = input.float(1.0, "每笔风险（% Equity）", minval=0.01, step=0.01)  // 每笔风险占权益百分比
+stopAtrMult = input.float(1.5, "止损 ATR 倍数 (用于计算 stop 距离)", minval=0.1, step=0.1)
+trailStartAtrMult = input.float(2.5, "开始跟踪止盈的利润阈值（ATR 倍数）", minval=0.1, step=0.1)
+trailAtrMult = input.float(1.0, "跟踪止损 ATR 倍数", minval=0.1, step=0.1)
+shortTakeProfitAtrMult = input.float(5.0, "做空大幅止盈触发 (ATR 倍数)", minval=0.1, step=0.1)
+
+// 震荡过滤（ADX）
+adxPeriod = input.int(14, "ADX 周期")
+adxThreshold = input.float(18, "ADX 最低阈值（低于视为震荡）")
+adxSmoothing = input.int(14, "ADX 平滑周期", minval=1)
+
+// 短空止盈后的冷却
+shortTpCooldownBars = input.int(48, "短空止盈后冷却 Bar 数（例如 48）", minval=0)
+
+// 分批（可选）——当前实现为单笔入场（保留参数以便扩展）
+entryParts = input.int(1, "分批入场份数（暂时同时下单）", minval=1, maxval=5)
+
+// 显示设置
+showTable = input.bool(true, "显示信息面板")
+
+// ====== 指标计算 ======
+emaLine = ta.ema(close, emaLength)
+atr = ta.atr(atrPeriod)
+[plusDI, minusDI, adx] = ta.dmi(adxPeriod, adxSmoothing)
+priceDistance = (close - emaLine) / math.max(atr, 1e-12)    // 以 ATR 为单位的偏离度（避免除 0）
+
+plot(emaLine, "EMA", color=color.new(color.yellow, 0), linewidth=2)
+hline(0, color=color.gray, title="zero")
+
+// ====== 持仓/冷却状态 ======
+var int lastShortTpBar = na
+isInCooldownShort = not na(lastShortTpBar) and (bar_index - lastShortTpBar) < shortTpCooldownBars
+
+// ====== 交易信号 ======
+canTradeByDate = (time >= startDateInput and time <= endDateInput)
+trendAbove = close > emaLine
+trendBelow = close < emaLine
+
+longSignal = trendAbove and priceDistance > atrEntryMult and not isInCooldownShort and adx >= adxThreshold
+shortSignal = trendBelow and priceDistance < -atrEntryMult and not isInCooldownShort and adx >= adxThreshold
+
+// ====== 仓位计算（按权益与 ATR 止损来计算 qty） ======
+safeAtr = math.max(atr, syminfo.mintick)  // 防止 atr = 0
+stopDistance = safeAtr * stopAtrMult
+// 当 stopDistance 非法时不下单
+canCalcQty = stopDistance > 0
+
+// 每笔允许风险（美元）
+riskUsd = strategy.equity * (riskPct / 100.0)
+// 期望的头寸价值（美元），使得当触及止损时损失约等于 riskUsd
+// 注意：当 stopDistance >> price 时 qtyUsd 会很小
+qtyUsd = canCalcQty ? (riskUsd / stopDistance) : 0.0
+// 将美元头寸转为资产数量（合约数），注意除以 close 得到单位量
+// 最低下单量保护（避免下非常小的 qty）
+minQty = 1e-6
+posQty = math.max(qtyUsd / close, minQty)
+
+// ====== 进场/出场与止损/跟踪止盈逻辑 ======
+var string longId = "Long"
+var string shortId = "Short"
+var string exitLongId = "ExitLong"
+var string exitShortId = "ExitShort"
+
+// 函数：计算止损价（长/短）
+getLongStopPrice(_entry) =>
+    _entry - stopDistance
+
+getShortStopPrice(_entry) =>
+    _entry + stopDistance
+
+// 进入条件（只在允许的时间区间内）
+if canTradeByDate
+    // 开多
+    if longSignal and strategy.position_size <= 0 and canCalcQty
+        // 下单
+        strategy.entry(longId, strategy.long, qty=posQty, comment="开多-ATR风险仓")
+        // 立即设初始止损（strategy.exit 更新会覆盖）
+        stopP = getLongStopPrice(close)
+        // 初始 exit 包含 stop；trail_points 先设为 na（后续按盈利触发更新）
+        strategy.exit(exitLongId, from_entry=longId, stop=stopP, comment="多-初始止损")
+    // 开空
+    if shortSignal and strategy.position_size >= 0 and canCalcQty
+        strategy.entry(shortId, strategy.short, qty=posQty, comment="开空-ATR风险仓")
+        stopP = getShortStopPrice(close)
+        strategy.exit(exitShortId, from_entry=shortId, stop=stopP, comment="空-初始止损")
+
+// 动态管理：如果持仓并且盈利超过阈值，激活跟踪止损
+if strategy.position_size > 0
+    avgEntry = strategy.position_avg_price
+    // 当前利润以 ATR 计
+    profitAtr = (close - avgEntry) / math.max(safeAtr, 1e-12)
+    // 当利润达到 trailStartAtrMult 时，启用跟踪止损 (trail_points 以价格点表示)
+    if profitAtr >= trailStartAtrMult
+        trailPoints = safeAtr * trailAtrMult
+        // 更新 exit：设置 trail_points 以启动跟踪止损，同时保留一个合理的初始 stop（防止第一次调用出错）
+        strategy.exit(exitLongId, from_entry=longId, stop=getLongStopPrice(avgEntry), trail_points=trailPoints, comment="多-跟踪止盈")
+    else
+        // 保持初始 ATR 止损
+        strategy.exit(exitLongId, from_entry=longId, stop=getLongStopPrice(avgEntry), comment="多-保持初始止损")
+        
+if strategy.position_size < 0
+    avgEntry = strategy.position_avg_price
+    profitAtr = (avgEntry - close) / math.max(safeAtr, 1e-12)
+    // 做空盈利到某个 ATR 开始跟踪
+    if profitAtr >= trailStartAtrMult
+        trailPoints = safeAtr * trailAtrMult
+        strategy.exit(exitShortId, from_entry=shortId, stop=getShortStopPrice(avgEntry), trail_points=trailPoints, comment="空-跟踪止盈")
+    else
+        strategy.exit(exitShortId, from_entry=shortId, stop=getShortStopPrice(avgEntry), comment="空-保持初始止损")
+
+// 特殊：如果空头达到大额止盈（shortTakeProfitAtrMult），立即平空并触发冷却
+if strategy.position_size < 0
+    avgEntry = strategy.position_avg_price
+    profitAtr = (avgEntry - close) / math.max(safeAtr, 1e-12)
+    if profitAtr <= -1e9
+        // no-op（安全）
+        na
+    if profitAtr >= shortTakeProfitAtrMult
+        // 平空并记录冷却开始 bar
+        strategy.close(shortId, comment="空-大止盈TP")
+        lastShortTpBar := bar_index
+
+// ==== 显示面板 ====
+if showTable
+    var table infoTable = table.new(position.top_right, 2, 5, border_color=color.gray, frame_color=color.black, frame_width=1)
+    table.cell(infoTable, 0, 0, "Equity", text_color=color.white)
+    table.cell(infoTable, 1, 0, str.tostring(strategy.equity, format.mintick), text_color=color.white)
+    table.cell(infoTable, 0, 1, "Price偏离 (ATR)", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(priceDistance, format="#.##"), text_color= priceDistance>0 ? color.green : color.red)
+    table.cell(infoTable, 0, 2, "ATR", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(atr, format.mintick), text_color=color.white)
+    table.cell(infoTable, 0, 3, "ADX", text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(adx, format="#.##"), text_color= adx>=adxThreshold ? color.green : color.orange)
+    table.cell(infoTable, 0, 4, "短空冷却中", text_color=color.white)
+    table.cell(infoTable, 1, 4, isInCooldownShort ? "是" : "否", text_color=isInCooldownShort ? color.red : color.green)
+
+// ====== 辅助绘图（可选） ======
+plotshape(longSignal and canTradeByDate, title="LongSig", location=location.belowbar, style=shape.triangleup, size=size.tiny, color=color.green, offset=0)
+plotshape(shortSignal and canTradeByDate, title="ShortSig", location=location.abovebar, style=shape.triangledown, size=size.tiny, color=color.red, offset=0)

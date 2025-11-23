@@ -229,6 +229,24 @@
                     <div class="chart-title">交易记录柱状图</div>
                     <canvas id="tradesBarChart"></canvas>
                 </div>
+
+                <div class="chart-container">
+                    <div class="chart-title">三币复利柱状折线图</div>
+                    <canvas id="compoundSummaryChart"></canvas>
+                </div>
+
+                <div class="chart-container">
+                    <div class="chart-title">BTC 历史复利柱状折线图</div>
+                    <canvas id="compoundHistoryBTC"></canvas>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">ETH 历史复利柱状折线图</div>
+                    <canvas id="compoundHistoryETH"></canvas>
+                </div>
+                <div class="chart-container">
+                    <div class="chart-title">SOL 历史复利柱状折线图</div>
+                    <canvas id="compoundHistorySOL"></canvas>
+                </div>
             </div>
 
             <div class="trades-table">
@@ -276,6 +294,8 @@
                     this.renderCoinButtons();
                     this.renderYearButtons();
                     this.renderTradesBarChart();
+                    await this.renderCompoundSummaryChart();
+                    await this.renderCompoundHistoryCharts();
                     this.renderTradesTable();
                     this.showContent();
                 } catch (error) {
@@ -359,6 +379,8 @@
                     this.renderCoinButtons();
                     this.renderYearButtons();
                     this.renderTradesBarChart(true);
+                    this.renderCompoundSummaryChart(true);
+                    this.renderCompoundHistoryCharts(true);
                     this.renderTradesTable();
                     document.getElementById('currentYear').textContent = this.currentYear;
                 }).catch(err => this.showError(err.message));
@@ -371,6 +393,182 @@
                 this.renderStats();
                 this.renderTradesTable();
                 document.getElementById('currentYear').textContent = year;
+            }
+
+            async renderCompoundHistoryCharts(recreate = false) {
+                const coinsAll = this.coinList.length ? this.coinList : ['btc','eth','sol'];
+                const coins = ['btc','eth','sol'].filter(c => coinsAll.includes(c));
+                for (const c of coins) {
+                    await this.renderCompoundHistoryForCoin(c, recreate);
+                }
+            }
+
+            async renderCompoundHistoryForCoin(c, recreate = false) {
+                const idMap = { btc: 'compoundHistoryBTC', eth: 'compoundHistoryETH', sol: 'compoundHistorySOL' };
+                const canvasId = idMap[c];
+                const el = document.getElementById(canvasId);
+                if (!el) return;
+                const resp = await fetch(`converted-data/${c}-trades.json`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const years = (data.summary && data.summary.years) ? data.summary.years : Object.keys(data.yearlyData || {}).sort();
+                const labels = [];
+                const barData = [];
+                const lineData = [];
+                let equity = 10000.0;
+                for (const y of years) {
+                    const trades = (data.yearlyData && data.yearlyData[y] && data.yearlyData[y].trades) ? data.yearlyData[y].trades : [];
+                    for (const t of trades) {
+                        const rate = Number(t.pnlPercent) / 100.0;
+                        const before = equity;
+                        const comp = Math.round(before * rate * 100) / 100;
+                        equity = Math.round((before + comp) * 100) / 100;
+                        labels.push(`#${t.tradeNum}`);
+                        barData.push(comp);
+                        lineData.push(equity);
+                    }
+                }
+                const ctx = el.getContext('2d');
+                const key = `compoundHistory_${c}`;
+                if (recreate && this.charts[key]) {
+                    this.charts[key].destroy();
+                }
+                const colorBar = c === 'btc' ? 'rgba(255, 159, 64, 0.6)' : (c === 'eth' ? 'rgba(153, 102, 255, 0.6)' : 'rgba(75, 192, 192, 0.6)');
+                const colorBarBorder = c === 'btc' ? 'rgba(255, 159, 64, 1)' : (c === 'eth' ? 'rgba(153, 102, 255, 1)' : 'rgba(75, 192, 192, 1)');
+                const colorLine = 'rgba(40, 167, 69, 1)';
+                const colorLineBg = 'rgba(40, 167, 69, 0.25)';
+                this.charts[key] = new Chart(ctx, {
+                    data: {
+                        labels,
+                        datasets: [
+                            {
+                                type: 'bar',
+                                label: '每笔复利收益',
+                                data: barData,
+                                backgroundColor: colorBar,
+                                borderColor: colorBarBorder,
+                                borderWidth: 1,
+                                yAxisID: 'y'
+                            },
+                            {
+                                type: 'line',
+                                label: '累计权益',
+                                data: lineData,
+                                borderColor: colorLine,
+                                backgroundColor: colorLineBg,
+                                tension: 0.2,
+                                yAxisID: 'y2'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { display: true },
+                            tooltip: {
+                                callbacks: {
+                                    label: (ctx) => {
+                                        if (ctx.dataset.type === 'bar') {
+                                            const v = ctx.parsed.y || 0;
+                                            const sign = v >= 0 ? '+' : '';
+                                            return `${sign}¥${v.toLocaleString()}`;
+                                        } else {
+                                            const v = ctx.parsed.y || 0;
+                                            return `权益 ¥${v.toLocaleString()}`;
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                position: 'left',
+                                ticks: { callback: (v) => '¥' + v.toLocaleString() },
+                                title: { display: true, text: '复利收益' }
+                            },
+                            y2: {
+                                position: 'right',
+                                grid: { drawOnChartArea: false },
+                                ticks: { callback: (v) => '¥' + v.toLocaleString() },
+                                title: { display: true, text: '累计权益' }
+                            }
+                        }
+                    }
+                });
+            }
+
+            async renderCompoundSummaryChart(recreate = false) {
+                const coinsAll = this.coinList.length ? this.coinList : ['btc','eth','sol'];
+                const coins = ['btc','eth','sol'].filter(c => coinsAll.includes(c));
+                const labels = coins.map(c => c.toUpperCase());
+                const initialEquity = 10000.0;
+                const compPnls = [];
+                const finalEquities = [];
+                for (const c of coins) {
+                    const resp = await fetch(`converted-data/${c}-trades.json`);
+                    if (!resp.ok) continue;
+                    const data = await resp.json();
+                    let equity = initialEquity;
+                    const years = (data.summary && data.summary.years) ? data.summary.years : Object.keys(data.yearlyData || {}).sort();
+                    for (const y of years) {
+                        const trades = (data.yearlyData && data.yearlyData[y] && data.yearlyData[y].trades) ? data.yearlyData[y].trades : [];
+                        for (const t of trades) {
+                            const rate = Number(t.pnlPercent) / 100.0;
+                            const comp = equity * rate;
+                            equity = Math.round((equity + comp) * 100) / 100;
+                        }
+                    }
+                    finalEquities.push(equity);
+                    compPnls.push(Math.round((equity - initialEquity) * 100) / 100);
+                }
+                const ctx = document.getElementById('compoundSummaryChart').getContext('2d');
+                if (recreate && this.charts.compoundSummary) {
+                    this.charts.compoundSummary.destroy();
+                }
+                this.charts.compoundSummary = new Chart(ctx, {
+                    data: {
+                        labels,
+                        datasets: [
+                            {
+                                type: 'bar',
+                                label: '复利累计收益',
+                                data: compPnls,
+                                backgroundColor: 'rgba(102, 126, 234, 0.6)',
+                                borderColor: 'rgba(102, 126, 234, 1)',
+                                borderWidth: 1,
+                                yAxisID: 'y'
+                            },
+                            {
+                                type: 'line',
+                                label: '最终权益',
+                                data: finalEquities,
+                                borderColor: 'rgba(40, 167, 69, 1)',
+                                backgroundColor: 'rgba(40, 167, 69, 0.25)',
+                                tension: 0.3,
+                                yAxisID: 'y2'
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: {
+                            legend: { display: true }
+                        },
+                        scales: {
+                            y: {
+                                position: 'left',
+                                ticks: { callback: (v) => '¥' + v.toLocaleString() },
+                                title: { display: true, text: '复利收益' }
+                            },
+                            y2: {
+                                position: 'right',
+                                grid: { drawOnChartArea: false },
+                                ticks: { callback: (v) => '¥' + v.toLocaleString() },
+                                title: { display: true, text: '最终权益' }
+                            }
+                        }
+                    }
+                });
             }
             
             renderTradesBarChart(recreate = false) {
